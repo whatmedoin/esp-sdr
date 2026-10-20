@@ -24,40 +24,34 @@ s31_unpack_iq10_win:
     esp.vldbc.32.ip q7,a4,0
     esp.ld.128.usar.ip q0, t3, 16
     esp.lp.setup 0,a3,.Lunpack_end
-    /* words 0..3 */
+    /* Process both vectors together to halve SAR changes. q0 remains the
+     * lookahead for the next iteration, including unaligned source loads. */
     esp.ld.128.usar.ip q1, t3, 16
-    esp.src.q    q2, q0, q1
-    esp.andq q3,q2,q6
-    li a4,6
-    esp.movx.w.sar a4
-    esp.vsl.32 q3,q3
-    li a4,12
-    esp.movx.w.sar a4
-    esp.andq q4,q2,q7
-    esp.vsl.32   q4, q4
-    esp.orq      q3, q3, q4
-    esp.vld.128.ip q5, t5, 16
-    li a4,15
-    esp.movx.w.sar a4
-    esp.vmul.s16 q3, q3, q5
-    esp.vst.128.ip q3, t4, 16
-    /* words 4..7 */
+    esp.src.q q2,q0,q1
     esp.ld.128.usar.ip q0, t3, 16
-    esp.src.q    q2, q1, q0
+    esp.src.q q4,q1,q0
     esp.andq q3,q2,q6
+    esp.andq q5,q4,q6
+    esp.andq q2,q2,q7
+    esp.andq q4,q4,q7
     li a4,6
     esp.movx.w.sar a4
     esp.vsl.32 q3,q3
+    esp.vsl.32 q5,q5
     li a4,12
     esp.movx.w.sar a4
-    esp.andq q4,q2,q7
-    esp.vsl.32   q4, q4
-    esp.orq      q3, q3, q4
-    esp.vld.128.ip q5, t5, 16
+    esp.vsl.32 q2,q2
+    esp.vsl.32 q4,q4
+    esp.orq q3,q3,q2
+    esp.orq q5,q5,q4
+    esp.vld.128.ip q2,t5,16
+    esp.vld.128.ip q4,t5,16
     li a4,15
     esp.movx.w.sar a4
-    esp.vmul.s16 q3, q3, q5
-.Lunpack_end: esp.vst.128.ip q3,t4,16
+    esp.vmul.s16 q3,q3,q2
+    esp.vmul.s16 q5,q5,q4
+    esp.vst.128.ip q3,t4,16
+.Lunpack_end: esp.vst.128.ip q5,t4,16
     addi sp,sp,16
     ret
     .size   s31_unpack_iq10_win, . - s31_unpack_iq10_win

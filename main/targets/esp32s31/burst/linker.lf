@@ -6,4 +6,5 @@ entries:
     receiver (noflash)
     s31_fft_rnd (noflash)
     s31_unpack (noflash)
+    s31_power (noflash)
     burst_serial:burst_serial_port (noflash)

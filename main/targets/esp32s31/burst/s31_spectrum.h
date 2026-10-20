@@ -11,7 +11,7 @@
 #define S31_NMAX      2048u
 #define S31_RING      16384u
 #define S31_MASK      (S31_RING - 1u)
-#define S31_UNIT      12288u
+#define S31_UNIT      14336u
 #define S31_GUARD     1024u
 #define S31_END_GUARD 2048u
 #define S31_LATE      800u
@@ -28,7 +28,7 @@ typedef struct {
     uint64_t index;
 } s31_job_t;
 typedef struct {
-    unsigned n, logn, rate, stride, upf, ms;
+    unsigned n, logn, rate, stride, upf, ms, unit;
     bool maximum, stats;
 } s31_config_t;
 static struct {
@@ -137,29 +137,17 @@ static void s31_emit(unsigned ffts, unsigned pairs, uint64_t index, unsigned gai
     else
         s31.drops++;
 }
-/* Integer squaring needs only one integer-to-float conversion per bin.
- * IQ16 squares sum to at most 2^31, so the unsigned sum cannot overflow.
- * All powers are finite; a direct comparison avoids libm NaN checks. */
-static void __attribute__((noinline)) s31_accumulate(const int16_t *restrict x, float *restrict power,
-                                                     unsigned n, bool maximum) {
-    if (maximum) {
-#pragma GCC unroll 4
-        for (unsigned j = 0; j < n; j++) {
-            int32_t re = x[2 * j], im = x[2 * j + 1];
-            float p = (float)((uint32_t)(re * re) + (uint32_t)(im * im));
-            float old = power[j];
-            __asm__("fmax.s %0,%1,%2" : "=f"(power[j]) : "f"(old), "f"(p));
-        }
-    } else {
-#pragma GCC unroll 4
-        for (unsigned j = 0; j < n; j++) {
-            int32_t re = x[2 * j], im = x[2 * j + 1];
-            power[j] += (float)((uint32_t)(re * re) + (uint32_t)(im * im));
-        }
-    }
-}
+extern void s31_accumulate(const int16_t *, float *, unsigned, bool);
+#ifdef S31_FFT_VERIFY
+#include "s31_fft_verify.h"
+static _Atomic unsigned s31_verified;
+#endif
 static void s31_worker(void *arg) {
     (void)arg;
+#ifdef S31_FFT_VERIFY
+    s31_fft_verify();
+    STORE(s31_verified, 1);
+#endif
     unsigned seen = 0;
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
@@ -293,11 +281,15 @@ static bool s31_spectrum_init(void) {
         s31_log_m[m] = lrintf(16 * 6.0206f * log2f(1 + ((float)m + .5f) / 128));
     s31_worker_task = xTaskCreateStaticPinnedToCore(s31_worker, "s31_fft", sizeof(s31_worker_stack), NULL, 20,
                                                     s31_worker_stack, &s31_worker_tcb, 1);
+#ifdef S31_FFT_VERIFY
+    while (s31_worker_task && !LOAD(s31_verified)) vTaskDelay(1);
+#endif
     return s31_worker_task != NULL;
 }
 static void IRAM_ATTR s31_run(unsigned *status, unsigned *detail, unsigned *units, uint64_t *pairs,
                               unsigned *stopped) {
     const s31_config_t cfg = s31.cfg;
+    const unsigned unit = cfg.unit;
     unsigned start_probe[2] = {S31_RING - 512, 0}, end_probe[2] = {0, 0};
     s31_mark(0, 0, S31_RING);
     s31_mark(1, 0, S31_RING);
@@ -311,18 +303,18 @@ static void IRAM_ATTR s31_run(unsigned *status, unsigned *detail, unsigned *unit
     REG_WRITE(DUMP_CTRL, ctrl);
     s31_select(0);
     REG_WRITE(DUMP_CTRL, ctrl | BIT(31));
-    for (unsigned unit = 0;; unit++) {
+    for (unsigned iteration = 0;; iteration++) {
         unsigned next = bank ^ 1;
         unsigned ptr, written, unit_start = esp_cpu_get_cycle_count();
         bool stop = false, prepared = false;
         for (;;) {
             ptr = REG_READ(DUMP_MODE) & S31_MASK;
             written = (ptr - expected) & S31_MASK;
-            if (written >= S31_UNIT) break;
+            if (written >= unit) break;
             const unsigned cpp = CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ * 1000000u / s31_rates[cfg.rate];
             /* Wait for the worker when possible, then revoke with enough time
              * for sentinel preparation before the next RF bank switch. */
-            if (!prepared && (!LOAD(s31.bank_seq[next]) || written + 16000 / cpp + 512 >= S31_UNIT)) {
+            if (!prepared && (!LOAD(s31.bank_seq[next]) || written + 16000 / cpp + 512 >= unit)) {
                 unsigned prep = esp_cpu_get_cycle_count();
                 STORE(s31.bank_seq[next], 0);
                 atomic_thread_fence(memory_order_seq_cst);
@@ -334,8 +326,8 @@ static void IRAM_ATTR s31_run(unsigned *status, unsigned *detail, unsigned *unit
                     }
                 }
                 if (*status) break;
-                start_probe[next] = (expected + S31_UNIT) & S31_MASK;
-                end_probe[next] = (expected + 2 * S31_UNIT) & S31_MASK;
+                start_probe[next] = (expected + unit) & S31_MASK;
+                end_probe[next] = (expected + 2 * unit) & S31_MASK;
                 s31_mark(next, start_probe[next], S31_GUARD);
                 s31_mark(next, end_probe[next], S31_END_GUARD);
                 prepared = true;
@@ -349,11 +341,11 @@ static void IRAM_ATTR s31_run(unsigned *status, unsigned *detail, unsigned *unit
                 break;
             }
             /* USB and timer calls stay out of the final polling margin. */
-            if (written + 2048 >= S31_UNIT) continue;
+            if (written + 2048 >= unit) continue;
             unsigned tx = esp_cpu_get_cycle_count();
             s31_pump();
             atomic_fetch_add_explicit(&s31.busy0, esp_cpu_get_cycle_count() - tx, memory_order_relaxed);
-            if (written > S31_UNIT / 2) {
+            if (written > unit / 2) {
                 int64_t now = esp_timer_get_time();
                 unsigned sent = LOAD(s31.txtail), done = LOAD(s31.taken);
                 /* A long averaging interval is not a stalled USB reader. */
@@ -374,7 +366,7 @@ static void IRAM_ATTR s31_run(unsigned *status, unsigned *detail, unsigned *unit
             *detail = 2;
             break;
         }
-        unsigned late = written - S31_UNIT;
+        unsigned late = written - unit;
         if (late > LOAD(s31.late)) STORE(s31.late, late);
         if (late > S31_LATE) {
             *status = 2;
@@ -391,8 +383,8 @@ static void IRAM_ATTR s31_run(unsigned *status, unsigned *detail, unsigned *unit
         unsigned settle = esp_cpu_get_cycle_count();
         while (esp_cpu_get_cycle_count() - settle <
                16 * (CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ * 1000000u / s31_rates[cfg.rate])) {}
-        unsigned first = s31_boundary(bank, start_probe[bank], unit ? S31_GUARD : 1024, false);
-        unsigned end = s31_boundary(bank, unit ? end_probe[bank] : ptr, unit ? S31_END_GUARD : 1024, true);
+        unsigned first = s31_boundary(bank, start_probe[bank], iteration ? S31_GUARD : 1024, false);
+        unsigned end = s31_boundary(bank, iteration ? end_probe[bank] : ptr, iteration ? S31_END_GUARD : 1024, true);
         if (first != expected) {
             *status = 4;
             *detail = first;
@@ -404,7 +396,7 @@ static void IRAM_ATTR s31_run(unsigned *status, unsigned *detail, unsigned *unit
             break;
         }
         unsigned count = (end - first) & S31_MASK;
-        if (count < S31_UNIT || count > S31_UNIT + S31_LATE + 128) {
+        if (count < unit || count > unit + S31_LATE + 128) {
             *status = 6;
             *detail = count;
             break;
@@ -504,6 +496,7 @@ static bool s31_spectrum_command(const char *line) {
     cfg.maximum = det;
     cfg.stats = stats;
     while ((1u << cfg.logn) < cfg.n) cfg.logn++;
+    cfg.unit = cfg.n == 1024u ? 12288u : 14336u;
     for (unsigned j = 0; j < cfg.n; j++) {
         s31_work.window[j] = lrintf(16383.5f * (1 - cosf(2 * M_PI * j / cfg.n)));
         s31_win2[2 * j] = s31_win2[2 * j + 1] = s31_work.window[j];
@@ -530,7 +523,7 @@ static bool s31_spectrum_command(const char *line) {
     s31.heap_largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
     prepare_rx();
     filter_apply();
-    reply("SPEC %u %u %u %u\n", cfg.n, s31_rates[cfg.rate], S31_UNIT, frequency_mhz);
+    reply("SPEC %u %u %u %u\n", cfg.n, s31_rates[cfg.rate], cfg.unit, frequency_mhz);
     STORE(s31.run, LOAD(s31.run) + 1);
     xTaskNotifyGive(s31_worker_task);
     unsigned status = 0, detail = 0, units = 0, stopped = 0;

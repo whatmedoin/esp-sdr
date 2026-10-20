@@ -54,8 +54,14 @@ elseif(IDF_TARGET STREQUAL "esp32c5" OR IDF_TARGET STREQUAL "esp32c6" OR IDF_TAR
 endif()
 
 if(IDF_TARGET STREQUAL "esp32s31")
-    list(APPEND sources "${target_dir}/s31_fft_rnd.S" "${target_dir}/s31_unpack.S")
+    list(APPEND sources "${target_dir}/s31_fft_rnd.S" "${target_dir}/s31_unpack.S" "${target_dir}/s31_power.S")
     list(APPEND fragments "${target_dir}/linker.lf")
+    option(S31_FFT_VERIFY "Compare S31 SIMD kernels with reference on core 1 (test only)" OFF)
+    if(S31_FFT_VERIFY)
+        list(APPEND sources "../tests/s31_fft_reference.S")
+        list(APPEND target_includes "../tests")
+        list(APPEND probes S31_FFT_VERIFY)
+    endif()
 endif()
 
 if(IDF_TARGET STREQUAL "esp32c61" OR IDF_TARGET STREQUAL "esp32s31")

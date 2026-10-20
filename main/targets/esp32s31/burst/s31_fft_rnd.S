@@ -92,18 +92,21 @@ s31_fft2r_sc16_rnd:
     bgt    t6, t2, .fft2r_l1// N2 > 2
 
     srli    t0, t0, 1       // ie = ie>>1
-    mv      x26, a2         // x26 - pointer to w
+    mv      x26, a2         // N2=2 twiddles: two groups per eight samples
+    mv      x25, a2         // N2=1 twiddles: four groups per eight samples
     mv      x24, a0
-    esp.lp.setup    0, t0, .fft2r_l2_1
+    // Fuse the last two stages, retaining each stage's Q15 truncation and
+    // sum-branch rounding. Process all N/8 groups, including the last eight.
+    esp.lp.setup    0, t0, .fft2r_last
         esp.vldbc.32.ip     q2, x26, 4
-        esp.vldbc.32.ip     q7, x26, 4
-        esp.vunzip.32       q2, q7
-        esp.vldbc.16.ip q7,x27,0
+        esp.vldbc.32.ip     q3, x26, 4
+        esp.vzip.32         q2, q3
 
-        esp.vld.l.64.ip     q0, x24, 8
-        esp.vld.l.64.ip     q1, x24, 8
-        esp.vld.h.64.ip     q0, x24, 8
-        esp.vld.h.64.ip     q1, x24, -24
+        esp.vld.128.ip      q0, x24, 16
+        esp.vld.128.ip      q1, x24, -16
+        // [0,4,1,5] and [2,6,3,7], with alternating group twiddles.
+        esp.vunzip.32       q0, q1
+        esp.vunzip.32       q0, q1
 
         esp.vmul.s16        q0, q0, q6
         esp.cmul.s16        q3, q2, q1, 2
@@ -112,35 +115,20 @@ s31_fft2r_sc16_rnd:
         esp.vadd.s16        q5, q0, q3
         esp.vadd.s16        q5, q5, q7
 
-        esp.vst.l.64.ip      q5, x24, 8
-        esp.vst.l.64.ip      q4, x24, 8
-        esp.vst.h.64.ip      q5, x24, 8
-.fft2r_l2_1:        esp.vst.h.64.ip      q4, x24, 8
+        // Restore contiguous groups, then select even/odd butterflies.
+        esp.vunzip.32       q5, q4
+        esp.vunzip.32       q5, q4
+        esp.vld.128.ip      q2, x25, 16
+        esp.cmul.s16        q3, q2, q4, 2
+        esp.vmul.s16        q5, q5, q6
+        esp.cmul.s16        q3, q2, q4, 3
+        esp.vsub.s16        q4, q5, q3
+        esp.vadd.s16        q5, q5, q3
+        esp.vadd.s16        q5, q5, q7
+        esp.vzip.32         q5, q4
 
-    mv      x26, a2  // x26 - pointer to w
-    mv      x24, a0
-    // lp.setup executes exactly t0 iterations. The upstream decrement skips
-    // the final eight complex samples of the last radix-2 stage on S31.
-
-    esp.lp.setup    0, t0, .fft2r_l2_0
-        esp.vld.128.ip      q0, x24, 16  // q0 = ia
-        esp.vld.128.ip      q1, x24,-16  // q1 = m
-        esp.vld.128.ip      q2, x26, 16
-
-        esp.vunzip.32       q0, q1
-
-        esp.cmul.s16        q3, q2, q1, 2
-        esp.vmul.s16        q0, q0, q6
-        esp.cmul.s16        q3, q2, q1, 3
-
-        esp.vsub.s16        q1, q0, q3
-        esp.vadd.s16        q0, q0, q3
-        esp.vadd.s16        q0, q0, q7
-
-        esp.vzip.32         q0, q1
-
-        esp.vst.128.ip      q0, x24, 16
-.fft2r_l2_0: esp.vst.128.ip      q1, x24, 16
+        esp.vst.128.ip      q5, x24, 16
+.fft2r_last: esp.vst.128.ip  q4, x24, 16
 
     lw  s8, 4(sp)
     lw  s9, 8(sp)
