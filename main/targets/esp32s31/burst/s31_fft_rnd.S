@@ -49,7 +49,7 @@ s31_fft2r_sc16_rnd:
 #
     srli t6, a1, 1 // t6 = N2 = N/2
     li   t0, 1     // t0 - ie
-    li   t2, 2     // t2 = 2 : limit for the loop N2 > 2
+    li   t2, 8     // Smaller stages use streaming loops below.
 
 .fft2r_l1:
         li t1, 0    // t1 - j
@@ -89,9 +89,55 @@ s31_fft2r_sc16_rnd:
 
         slli    t0, t0, 1   // ie = ie<<1
         srli    t6, t6, 1   // t6 = N2 = N2>>1
-    bgt    t6, t2, .fft2r_l1// N2 > 2
+    bgt    t6, t2, .fft2r_l1// N2 > 8
 
-    srli    t0, t0, 1       // ie = ie>>1
+    // N2=8: two vector butterflies per twiddle, no per-group address rebuild.
+    mv      x24, a0
+    addi    x25, a0, 32
+    mv      x26, a2
+    esp.lp.setup 0, t0, .fft2r_8_end
+        esp.vldbc.32.ip     q5, x26, 4
+        esp.vld.128.ip      q0, x25, 0
+        esp.vld.128.ip      q2, x24, 0
+        esp.cmul.s16        q1, q5, q0, 2
+        esp.vmul.s16        q2, q2, q6
+        esp.cmul.s16        q1, q5, q0, 3
+        esp.vsub.s16        q3, q2, q1
+        esp.vadd.s16.st.incp q3, x25, q4, q2, q1
+        esp.vadd.s16        q4, q4, q7
+        esp.vst.128.ip      q4, x24, 16
+
+        esp.vld.128.ip      q0, x25, 0
+        esp.vld.128.ip      q2, x24, 0
+        esp.cmul.s16        q1, q5, q0, 2
+        esp.vmul.s16        q2, q2, q6
+        esp.cmul.s16        q1, q5, q0, 3
+        esp.vsub.s16        q3, q2, q1
+        esp.vadd.s16.st.incp q3, x25, q4, q2, q1
+        esp.vadd.s16        q4, q4, q7
+        esp.vst.128.ip      q4, x24, 16
+        addi               x24, x24, 32
+.fft2r_8_end: addi          x25, x25, 32
+
+    // N2=4: one vector butterfly per twiddle.
+    slli    t0, t0, 1
+    mv      x24, a0
+    addi    x25, a0, 16
+    mv      x26, a2
+    esp.lp.setup 0, t0, .fft2r_4_end
+        esp.vldbc.32.ip     q5, x26, 4
+        esp.vld.128.ip      q0, x25, 0
+        esp.vld.128.ip      q2, x24, 0
+        esp.cmul.s16        q1, q5, q0, 2
+        esp.vmul.s16        q2, q2, q6
+        esp.cmul.s16        q1, q5, q0, 3
+        esp.vsub.s16        q3, q2, q1
+        esp.vadd.s16.st.incp q3, x25, q4, q2, q1
+        esp.vadd.s16        q4, q4, q7
+        esp.vst.128.ip      q4, x24, 16
+        addi               x24, x24, 16
+.fft2r_4_end: addi          x25, x25, 16
+
     mv      x26, a2         // N2=2 twiddles: two groups per eight samples
     mv      x25, a2         // N2=1 twiddles: four groups per eight samples
     mv      x24, a0
