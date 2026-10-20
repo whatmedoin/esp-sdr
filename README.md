@@ -1,3 +1,7 @@
+> This fork contains performance improvements to FFT processing on the ESP32-S31 chip. Check out the [report](docs/features/fft_optim/README.md) for benchmarks and changes made. 
+
+---
+
 # ESP-SDR firmware
 
 <img src="docs/espargos-logo.png" width="40%" align="right" alt="ESPARGOS logo">
