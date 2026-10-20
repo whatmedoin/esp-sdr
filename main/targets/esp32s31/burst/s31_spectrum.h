@@ -138,14 +138,17 @@ static void s31_emit(unsigned ffts, unsigned pairs, uint64_t index, unsigned gai
         s31.drops++;
 }
 extern void s31_accumulate(const int16_t *, float *, unsigned, bool);
+#include "s31_prefetch.h"
 #ifdef S31_FFT_VERIFY
 #include "s31_fft_verify.h"
+#include "s31_prefetch_verify.h"
 static _Atomic unsigned s31_verified;
 #endif
 static void s31_worker(void *arg) {
     (void)arg;
 #ifdef S31_FFT_VERIFY
     s31_fft_verify();
+    s31_prefetch_verify();
     STORE(s31_verified, 1);
 #endif
     unsigned seen = 0;
@@ -155,6 +158,7 @@ static void s31_worker(void *arg) {
         if (run == seen) continue;
         seen = run;
         const s31_config_t cfg = s31.cfg;
+        const unsigned depth = S31_NMAX / cfg.n;
         unsigned taken = 0, units = 0, ffts = 0, pairs = 0, gain = 0;
         uint64_t index = 0;
         bool gaps = false;
@@ -173,56 +177,32 @@ static void s31_worker(void *arg) {
                 gain = job.gain;
             }
             unsigned blocks = job.count >> cfg.logn;
-            for (unsigned block = job.phase; block < blocks; block += cfg.stride) {
-                unsigned start = esp_cpu_get_cycle_count(), at = job.first + block * cfg.n;
-                bool valid = true;
-                for (unsigned from = 0; from < cfg.n; from += 128) {
-                    /* Publish the read before testing ownership. Paired full
-                     * fences prevent a store/load race with bank revocation. */
-                    STORE(s31.reader, job.bank + 1);
-                    atomic_thread_fence(memory_order_seq_cst);
-                    if (LOAD(s31.bank_seq[job.bank]) != job.seq) {
-                        valid = false;
-                        STORE(s31.reader, 0);
-                        break;
-                    }
-                    unsigned to = from + 128, j = from;
-                    while (j < to) {
-                        unsigned first = (at + j) & S31_MASK;
-                        unsigned available = first + 4 < S31_RING ? S31_RING - first - 4 : 0;
-                        unsigned count = to - j < available ? to - j : available, bulk = count & ~7u;
-                        if (bulk) {
-                            s31_unpack_iq10_win((const uint32_t *)s31_bank(job.bank) + first,
-                                                s31_work.fft + 2 * j, s31_win2 + 2 * j, bulk / 8);
-                            j += bulk;
-                        } else {
-                            unsigned end = j + 8 < to ? j + 8 : to;
-                            for (; j < end; j++) {
-                                uint32_t w = s31_bank(job.bank)[(at + j) & S31_MASK];
-                                int32_t i = (int32_t)(w << 22) >> 22, q = (int32_t)(w << 12) >> 22;
-                                s31_work.fft[2 * j] = (i * s31_work.window[j]) >> 9;
-                                s31_work.fft[2 * j + 1] = (q * s31_work.window[j]) >> 9;
-                            }
-                        }
-                    }
-                    STORE(s31.reader, 0);
+            for (unsigned block = job.phase; block < blocks;) {
+                unsigned count = (blocks - block + cfg.stride - 1) / cfg.stride;
+                if (count > depth) count = depth;
+                unsigned copy_cycles[S31_NMAX / 256u];
+                unsigned ready = s31_prefetch(&cfg, &job, block, count, copy_cycles);
+                if (ready && block + ready * cfg.stride >= blocks) {
+                    unsigned sequence = job.seq;
+                    atomic_compare_exchange_strong(&s31.bank_seq[job.bank], &sequence, 0);
                 }
-                if (!valid) {
+                /* A revoked bank cannot invalidate already-private windows. */
+                for (unsigned j = 0; j < ready; j++, block += cfg.stride) {
+                    unsigned start = esp_cpu_get_cycle_count();
+                    int16_t *x = s31_work.fft + 2 * j * cfg.n;
+                    s31_fft2r_sc16_rnd(x, cfg.n, dsps_fft_w_table_sc16);
+                    spectrum_dc_apply(&dc, x, cfg.n);
+                    s31_accumulate(x, s31_work.power, cfg.n, cfg.maximum);
+                    ffts++;
+                    s31.ffts++;
+                    unsigned dt = esp_cpu_get_cycle_count() - start + copy_cycles[j];
+                    if (dt > s31.work_max) s31.work_max = dt;
+                }
+                if (ready < count) {
                     s31.skipped += (blocks - block + cfg.stride - 1) / cfg.stride;
                     gaps = true;
                     break;
                 }
-                if (block + cfg.stride >= blocks) {
-                    unsigned sequence = job.seq;
-                    atomic_compare_exchange_strong(&s31.bank_seq[job.bank], &sequence, 0);
-                }
-                s31_fft2r_sc16_rnd(s31_work.fft, cfg.n, dsps_fft_w_table_sc16);
-                spectrum_dc_apply(&dc, s31_work.fft, cfg.n);
-                s31_accumulate(s31_work.fft, s31_work.power, cfg.n, cfg.maximum);
-                ffts++;
-                s31.ffts++;
-                unsigned dt = esp_cpu_get_cycle_count() - start;
-                if (dt > s31.work_max) s31.work_max = dt;
             }
             unsigned sequence = job.seq;
             atomic_compare_exchange_strong(&s31.bank_seq[job.bank], &sequence, 0);
